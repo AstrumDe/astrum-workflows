@@ -39,15 +39,8 @@ jobs:
     
     - name: Validate inputs
       run: |
-
-        echo "Project type input: [${{ inputs.project_type }}]"
-        echo "ALLOWED_BRANCHES secret: [${{ secrets.ALLOWED_BRANCHES }}]"
-        echo "Event name: [${{ github.event_name }}]"
-        echo "Branch name: [${{ github.ref_name }}]"
-        # Проверяем project_type
+        # Проверяем project_type (работает)
         PROJECT_TYPE="${{ inputs.project_type }}"
-        echo "Project type input: [$PROJECT_TYPE]"
-        
         case "$PROJECT_TYPE" in
           "admin"|"user")
             echo "✅ Valid project type: $PROJECT_TYPE"
@@ -58,23 +51,20 @@ jobs:
             ;;
         esac
         
-        # Проверяем branch
+        # Простая проверка веток без secrets
         BRANCH_NAME="${{ github.ref_name }}"
-        ALLOWED_BRANCHES="${{ secrets.ALLOWED_BRANCHES }}"
-
-        if [[ "${{ github.event_name }}" == "push" ]]; then
-        if [[ ",$ALLOWED_AUTO_BRANCHES," != *",$BRANCH_NAME,"* ]]; then
-          echo "❌ Auto-deploy not allowed for branch $BRANCH_NAME"
+        EVENT_NAME="${{ github.event_name }}"
+        
+        echo "Branch: $BRANCH_NAME"
+        echo "Event: $EVENT_NAME"
+        
+        # Автодеплой только для dev
+        if [ "$EVENT_NAME" = "push" ] && [ "$BRANCH_NAME" != "dev" ]; then
+          echo "❌ Auto-deploy only allowed for dev branch"
           exit 1
-          fi
-        fi
-
-        # Ручной запуск - для любых веток
-        if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-          echo "✅ Manual deployment allowed for $BRANCH_NAME"
         fi
         
-        echo "✅ Validation passed for project: ${{ inputs.project_type }}, branch: $BRANCH_NAME"
+        echo "✅ Validation passed"
     
     - name: Setup Node.js
       uses: actions/setup-node@v4
