@@ -1,0 +1,175 @@
+name: Reusable Deploy Workflow
+
+on:
+  workflow_call:
+    inputs:
+      project_type:
+        required: true
+        type: string
+        description: 'Project type: admin or user'
+      node_version:
+        required: false
+        type: string
+        default: '20.17.0'
+        description: 'Node.js version'
+    secrets:
+      TELEGRAM_BOT_TOKEN:
+        required: true
+      TELEGRAM_CHAT_ID_1:
+        required: true
+      TELEGRAM_CHAT_ID_2:
+        required: true
+      DEPLOY_BASE_PATH:
+        required: true
+      PRODUCTION_API_URL:
+        required: true
+      DEV_API_URL:
+        required: true
+      TEST_API_URL:
+        required: true
+      ALLOWED_BRANCHES:
+        required: true
+
+jobs:
+  deploy:
+    runs-on: [self-hosted, astrum-deploy]
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Validate inputs
+      run: |
+        # Проверяем project_type
+        if [[ "${{ inputs.project_type }}" != "admin" && "${{ inputs.project_type }}" != "user" ]]; then
+          echo "❌ Invalid project_type: ${{ inputs.project_type }}"
+          exit 1
+        fi
+        
+        # Проверяем branch
+        BRANCH_NAME="${{ github.ref_name }}"
+        ALLOWED_BRANCHES="${{ secrets.ALLOWED_BRANCHES }}"
+        
+        if [[ ",$ALLOWED_BRANCHES," != *",$BRANCH_NAME,"* ]]; then
+          echo "❌ Branch $BRANCH_NAME is not allowed for deployment"
+          echo "Allowed branches: $ALLOWED_BRANCHES"
+          exit 1
+        fi
+        
+        echo "✅ Validation passed for project: ${{ inputs.project_type }}, branch: $BRANCH_NAME"
+    
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '${{ inputs.node_version }}'
+        cache: 'yarn'
+    
+    - name: Install dependencies
+      run: yarn install --frozen-lockfile
+    
+    - name: Set environment variables
+      run: |
+        PROJECT_TYPE="${{ inputs.project_type }}"
+        BASE_PATH="${{ secrets.DEPLOY_BASE_PATH }}"
+        
+        # Защищенное определение окружения
+        case "${{ github.ref_name }}" in
+          "main")
+            echo "VITE_API_URL=${{ secrets.PRODUCTION_API_URL }}" > .env
+            DEPLOY_PATH="$BASE_PATH/production/$PROJECT_TYPE"
+            ENVIRONMENT="production"
+            ;;
+          "dev")
+            echo "VITE_API_URL=${{ secrets.DEV_API_URL }}" > .env
+            DEPLOY_PATH="$BASE_PATH/dev/$PROJECT_TYPE"
+            ENVIRONMENT="development"
+            ;;
+          "test")
+            echo "VITE_API_URL=${{ secrets.TEST_API_URL }}" > .env
+            DEPLOY_PATH="$BASE_PATH/test/$PROJECT_TYPE"
+            ENVIRONMENT="test"
+            ;;
+          *)
+            echo "❌ Unknown branch: ${{ github.ref_name }}"
+            exit 1
+            ;;
+        esac
+        
+        # Дополнительная проверка пути
+        if [[ "$DEPLOY_PATH" != "$BASE_PATH"* ]]; then
+          echo "❌ Invalid deploy path: $DEPLOY_PATH"
+          exit 1
+        fi
+        
+        # Проверяем что директория существует
+        if [ ! -d "$DEPLOY_PATH" ]; then
+          echo "❌ Deploy directory does not exist: $DEPLOY_PATH"
+          exit 1
+        fi
+        
+        echo "DEPLOY_PATH=$DEPLOY_PATH" >> $GITHUB_ENV
+        echo "ENVIRONMENT=$ENVIRONMENT" >> $GITHUB_ENV
+        echo "PROJECT_TYPE=$PROJECT_TYPE" >> $GITHUB_ENV
+        
+        echo "✅ Deploy target: $ENVIRONMENT -> $DEPLOY_PATH"
+    
+    - name: Build project
+      run: |
+        echo "🏗️ Building ${{ env.PROJECT_TYPE }} for ${{ env.ENVIRONMENT }}..."
+        yarn build
+        
+        # Проверяем что build создался
+        if [ ! -d "dist" ]; then
+          echo "❌ Build failed - dist directory not found"
+          exit 1
+        fi
+        
+        echo "✅ Build completed successfully"
+    
+    - name: Deploy to server
+      run: |
+        echo "🚀 Deploying to ${{ env.DEPLOY_PATH }}..."
+        
+        # Финальная проверка пути перед деплоем
+        if [[ "${{ env.DEPLOY_PATH }}" != "${{ secrets.DEPLOY_BASE_PATH }}"* ]]; then
+          echo "❌ Security check failed: invalid deploy path"
+          exit 1
+        fi
+        
+        # Создаем backup
+        if [ -d "${{ env.DEPLOY_PATH }}" ] && [ "$(ls -A ${{ env.DEPLOY_PATH }})" ]; then
+          BACKUP_DIR="${{ env.DEPLOY_PATH }}.backup.$(date +%Y%m%d_%H%M%S)"
+          echo "📦 Creating backup: $BACKUP_DIR"
+          cp -r "${{ env.DEPLOY_PATH }}" "$BACKUP_DIR"
+        fi
+        
+        # Деплоим
+        rm -rf ${{ env.DEPLOY_PATH }}/*
+        cp -r dist/* ${{ env.DEPLOY_PATH }}/
+        
+        # Проверяем что файлы скопировались
+        if [ ! -f "${{ env.DEPLOY_PATH }}/index.html" ]; then
+          echo "❌ Deploy failed - index.html not found"
+          exit 1
+        fi
+        
+        echo "✅ Deploy completed successfully"
+        
+    - name: Send Telegram notification
+      if: always()
+      run: |
+        STATUS_EMOJI="✅"
+        STATUS_TEXT="deployed successfully"
+        if [ "${{ job.status }}" != "success" ]; then
+          STATUS_EMOJI="❌"
+          STATUS_TEXT="deployment failed"
+        fi
+        
+        MESSAGE="${STATUS_EMOJI} Astrum ${{ env.PROJECT_TYPE }} (${{ env.ENVIRONMENT }}) ${STATUS_TEXT}! Branch: ${{ github.ref_name }}, Author: ${{ github.actor }}, Repository: ${{ github.repository }}"
+        
+        curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+          -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID_1 }}" \
+          -d "text=${MESSAGE}"
+          
+        curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+          -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID_2 }}" \
+          -d "text=${MESSAGE}"
