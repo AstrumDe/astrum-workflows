@@ -45,8 +45,9 @@ jobs:
         echo "Event name: [${{ github.event_name }}]"
         echo "Branch name: [${{ github.ref_name }}]"
         # Проверяем project_type
-        if [[ "${{ inputs.project_type }}" != "admin" && "${{ inputs.project_type }}" != "user" ]]; then
-          echo "❌ Invalid project_type: ${{ inputs.project_type }}"
+        PROJECT_TYPE="${{ inputs.project_type }}"
+        if [ "$PROJECT_TYPE" != "admin" ] && [ "$PROJECT_TYPE" != "user" ]; then
+          echo "❌ Invalid project_type: $PROJECT_TYPE"
           exit 1
         fi
         
