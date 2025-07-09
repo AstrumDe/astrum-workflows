@@ -46,10 +46,17 @@ jobs:
         echo "Branch name: [${{ github.ref_name }}]"
         # Проверяем project_type
         PROJECT_TYPE="${{ inputs.project_type }}"
-        if [ "$PROJECT_TYPE" != "admin" ] && [ "$PROJECT_TYPE" != "user" ]; then
-          echo "❌ Invalid project_type: $PROJECT_TYPE"
-          exit 1
-        fi
+        echo "Project type input: [$PROJECT_TYPE]"
+        
+        case "$PROJECT_TYPE" in
+          "admin"|"user")
+            echo "✅ Valid project type: $PROJECT_TYPE"
+            ;;
+          *)
+            echo "❌ Invalid project_type: $PROJECT_TYPE"
+            exit 1
+            ;;
+        esac
         
         # Проверяем branch
         BRANCH_NAME="${{ github.ref_name }}"
