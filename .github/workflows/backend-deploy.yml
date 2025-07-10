@@ -71,7 +71,7 @@ jobs:
         set -e
         
         ENV="${{ env.TARGET_ENV }}"
-        API_DIR="/home/${ENV}"
+        API_DIR="/home/${ENV}/api"
         SERVICE_NAME="${ENV}-api"
         
         echo "🎯 Deploying to ${ENV} environment..."
@@ -82,27 +82,22 @@ jobs:
         echo "⏹️ Stopping ${SERVICE_NAME} service..."
         sudo systemctl stop ${SERVICE_NAME}
         
-        # Обновляем код - копируем из checkout'а runner'а
+        # Обновляем код
         echo "📥 Updating code for ${ENV} environment..."
         
-        # Создаем временную директорию для бэкапа
+        TEMP_DIR="/tmp/deploy_${ENV}_$(date +%s)"
+        mkdir -p ${TEMP_DIR}
+        cp -r app/ requirements.txt alembic.ini alembic/ ${TEMP_DIR}/ 2>/dev/null || true
+        
         sudo -u ${ENV} bash -c "
           cd ${API_DIR}
           if [ -d app ]; then
-            rm -rf app.backup.$(date +%Y%m%d_%H%M%S) 2>/dev/null || true
-            cp -r app app.backup.$(date +%Y%m%d_%H%M%S) 2>/dev/null || true
+            cp -r app app.backup.\$(date +%Y%m%d_%H%M%S) 2>/dev/null || true
           fi
+          cp -r ${TEMP_DIR}/* ./
         "
         
-        # Копируем новый код (исключая .git, venv и другие служебные папки)
-        echo "📋 Copying new code to ${API_DIR}..."
-        sudo cp -r app/ ${API_DIR}/ 2>/dev/null || true
-        sudo cp requirements.txt ${API_DIR}/ 2>/dev/null || true
-        sudo cp alembic.ini ${API_DIR}/ 2>/dev/null || true
-        sudo cp -r alembic/ ${API_DIR}/ 2>/dev/null || true
-        
-        # Устанавливаем правильные права
-        sudo chown -R ${ENV}:api-deployers ${API_DIR}/app/ ${API_DIR}/requirements.txt ${API_DIR}/alembic.ini ${API_DIR}/alembic/
+        rm -rf ${TEMP_DIR}
         
         # Устанавливаем зависимости от имени пользователя
         echo "📦 Installing dependencies as user ${ENV}..."
