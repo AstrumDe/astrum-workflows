@@ -1,0 +1,177 @@
+name: Reusable Backend Deploy Workflow
+
+on:
+  workflow_call:
+    secrets:
+      TELEGRAM_BOT_TOKEN:
+        required: true
+      TELEGRAM_CHAT_ID_1:
+        required: true
+      TELEGRAM_CHAT_ID_2:
+        required: true
+      TELEGRAM_CHAT_IDS:
+        required: false
+        description: 'Comma-separated list of additional chat IDs'
+
+jobs:
+  deploy:
+    runs-on: [self-hosted]
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Validate deployment permissions
+      run: |
+        BRANCH_NAME="${{ github.ref_name }}"
+        EVENT_NAME="${{ github.event_name }}"
+        
+        echo "Branch: $BRANCH_NAME"
+        echo "Event: $EVENT_NAME"
+        
+        # ЖЕСТКИЕ ПРАВИЛА - НЕ МОГУТ БЫТЬ ИЗМЕНЕНЫ РАЗРАБОМ:
+        # 1. Push в dev - автоматом деплоим в dev
+        # 2. Manual dispatch - ТОЛЬКО из main в prod/test
+        # 3. Никаких других вариантов
+        
+        if [ "$EVENT_NAME" = "push" ]; then
+          if [ "$BRANCH_NAME" != "dev" ]; then
+            echo "❌ Auto-deploy only allowed for 'dev' branch"
+            exit 1
+          fi
+          echo "TARGET_ENV=dev" >> $GITHUB_ENV
+          echo "✅ Auto-deploy to dev environment"
+          
+        elif [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+          if [ "$BRANCH_NAME" != "main" ]; then
+            echo "❌ Manual deploy only allowed from 'main' branch"
+            echo "❌ Current branch: $BRANCH_NAME"
+            echo "❌ For dev deployment, push to 'dev' branch instead"
+            exit 1
+          fi
+          
+          # Для manual dispatch определяем окружение по input'у
+          TARGET="${{ github.event.inputs.environment || 'prod' }}"
+          if [[ "$TARGET" != "prod" && "$TARGET" != "test" ]]; then
+            echo "❌ Invalid environment: $TARGET"
+            exit 1
+          fi
+          
+          echo "TARGET_ENV=$TARGET" >> $GITHUB_ENV
+          echo "✅ Manual deploy to $TARGET environment"
+          
+        else
+          echo "❌ Unsupported event: $EVENT_NAME"
+          exit 1
+        fi
+        
+        echo "✅ Validation passed"
+    
+    - name: Deploy to server
+      run: |
+        set -e
+        
+        ENV="${{ env.TARGET_ENV }}"
+        API_DIR="/home/${ENV}/api"
+        SERVICE_NAME="${ENV}-api"
+        
+        echo "🎯 Deploying to ${ENV} environment..."
+        echo "📁 API Directory: ${API_DIR}"
+        echo "🔧 Service: ${SERVICE_NAME}"
+        
+        # Проверяем что директория существует
+        if [ ! -d "${API_DIR}" ]; then
+          echo "❌ Directory ${API_DIR} does not exist"
+          exit 1
+        fi
+        
+        # Переходим в директорию проекта
+        cd ${API_DIR}
+        
+        # Останавливаем сервис
+        echo "⏹️ Stopping ${SERVICE_NAME} service..."
+        sudo systemctl stop ${SERVICE_NAME}
+        
+        # Бэкапим текущую версию
+        if [ -d "backup" ]; then
+          rm -rf backup
+        fi
+        mkdir -p backup
+        cp -r app/ backup/ 2>/dev/null || true
+        echo "📦 Backup created"
+        
+        # Обновляем код
+        echo "📥 Updating code..."
+        git fetch origin
+        git checkout ${{ github.ref_name }}
+        git pull origin ${{ github.ref_name }}
+        
+        # Активируем venv и устанавливаем зависимости
+        echo "📦 Installing dependencies..."
+        source venv/bin/activate
+        pip install --upgrade pip
+        pip install -r requirements.txt
+        
+        # Накатываем миграции
+        echo "🔄 Running migrations..."
+        source venv/bin/activate
+        alembic upgrade head
+        
+        # Запускаем сервис
+        echo "▶️ Starting ${SERVICE_NAME} service..."
+        sudo systemctl start ${SERVICE_NAME}
+        
+        # Ждем и проверяем статус
+        sleep 5
+        echo "🔍 Checking service status..."
+        sudo systemctl status ${SERVICE_NAME} --no-pager
+        
+        # Финальная проверка
+        if sudo systemctl is-active --quiet ${SERVICE_NAME}; then
+          echo "✅ ${SERVICE_NAME} is running successfully!"
+          echo "DEPLOY_STATUS=success" >> $GITHUB_ENV
+        else
+          echo "❌ ${SERVICE_NAME} failed to start!"
+          echo "📋 Service logs:"
+          sudo journalctl -u ${SERVICE_NAME} --no-pager -n 50
+          echo "DEPLOY_STATUS=failed" >> $GITHUB_ENV
+          exit 1
+        fi
+        
+        echo "🚀 Deployment completed successfully!"
+        
+    - name: Send Telegram notifications
+      if: always()
+      run: |
+        STATUS_EMOJI="✅"
+        STATUS_TEXT="deployed successfully"
+        if [ "${{ job.status }}" != "success" ]; then
+          STATUS_EMOJI="❌"
+          STATUS_TEXT="deployment failed"
+        fi
+        
+        MESSAGE="${STATUS_EMOJI} Backend API (${{ env.TARGET_ENV }}) ${STATUS_TEXT}! Branch: ${{ github.ref_name }}, Author: ${{ github.actor }}, Repository: ${{ github.repository }}"
+        
+        # Отправляем в основные чаты
+        curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+          -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID_1 }}" \
+          -d "text=${MESSAGE}"
+          
+        curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+          -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID_2 }}" \
+          -d "text=${MESSAGE}"
+        
+        # Отправляем в дополнительные чаты из списка (если есть)
+        CHAT_IDS="${{ secrets.TELEGRAM_CHAT_IDS }}"
+        if [ -n "$CHAT_IDS" ]; then
+          IFS=',' read -ra CHAT_ARRAY <<< "$CHAT_IDS"
+          for chat_id in "${CHAT_ARRAY[@]}"; do
+            # Убираем пробелы
+            chat_id=$(echo "$chat_id" | tr -d ' ')
+            if [ -n "$chat_id" ]; then
+              echo "Sending to additional chat: $chat_id"
+              curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+                -d "chat_id=${chat_id}" \
+                -d "text=${MESSAGE}"
+            fi
+          done
+        fi
