@@ -86,17 +86,9 @@ jobs:
         echo "📥 Updating code as user ${ENV}..."
         sudo -u ${ENV} bash -c "
           cd ${API_DIR}
-          echo '📍 Current directory: $(pwd)'
-          echo '📋 Directory contents:'
-          ls -la
-          
-          if [ -d '.git' ]; then
-            git fetch origin
-            git checkout ${{ github.ref_name }}
-            git pull origin ${{ github.ref_name }}
-          else
-            echo '⚠️ No git repository found'
-          fi
+          git fetch origin
+          git checkout ${{ github.ref_name }}
+          git pull origin ${{ github.ref_name }}
         "
         
         # Устанавливаем зависимости от имени пользователя
