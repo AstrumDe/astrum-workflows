@@ -71,21 +71,26 @@ jobs:
         set -e
         
         ENV="${{ env.TARGET_ENV }}"
-        API_DIR="/home/${ENV}/api"
+        API_DIR="/home/${ENV}"
         SERVICE_NAME="${ENV}-api"
         
         echo "🎯 Deploying to ${ENV} environment..."
         echo "📁 API Directory: ${API_DIR}"
         echo "🔧 Service: ${SERVICE_NAME}"
         
-        # Проверяем что директория существует
+        # Проверяем что директория существует и переходим в неё
         if [ ! -d "${API_DIR}" ]; then
           echo "❌ Directory ${API_DIR} does not exist"
           exit 1
         fi
         
-        # Переходим в директорию проекта
+        echo "📁 Changing to directory: ${API_DIR}"
         cd ${API_DIR}
+        
+        # Проверяем что мы в правильной директории
+        echo "📍 Current directory: $(pwd)"
+        echo "📋 Directory contents:"
+        ls -la
         
         # Останавливаем сервис
         echo "⏹️ Stopping ${SERVICE_NAME} service..."
@@ -101,9 +106,15 @@ jobs:
         
         # Обновляем код
         echo "📥 Updating code..."
-        git fetch origin
-        git checkout ${{ github.ref_name }}
-        git pull origin ${{ github.ref_name }}
+        if [ -d ".git" ]; then
+          git fetch origin
+          git checkout ${{ github.ref_name }}
+          git pull origin ${{ github.ref_name }}
+        else
+          echo "⚠️ No git repository found in ${API_DIR}"
+          echo "📋 Available files:"
+          ls -la
+        fi
         
         # Активируем venv и устанавливаем зависимости
         echo "📦 Installing dependencies..."
