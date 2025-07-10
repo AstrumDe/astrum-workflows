@@ -78,54 +78,43 @@ jobs:
         echo "📁 API Directory: ${API_DIR}"
         echo "🔧 Service: ${SERVICE_NAME}"
         
-        # Проверяем что директория существует и переходим в неё
-        if [ ! -d "${API_DIR}" ]; then
-          echo "❌ Directory ${API_DIR} does not exist"
-          exit 1
-        fi
-        
-        echo "📁 Changing to directory: ${API_DIR}"
-        cd ${API_DIR}
-        
-        # Проверяем что мы в правильной директории
-        echo "📍 Current directory: $(pwd)"
-        echo "📋 Directory contents:"
-        ls -la
-        
         # Останавливаем сервис
         echo "⏹️ Stopping ${SERVICE_NAME} service..."
         sudo systemctl stop ${SERVICE_NAME}
         
-        # Бэкапим текущую версию
-        if [ -d "backup" ]; then
-          rm -rf backup
-        fi
-        mkdir -p backup
-        cp -r app/ backup/ 2>/dev/null || true
-        echo "📦 Backup created"
-        
-        # Обновляем код
-        echo "📥 Updating code..."
-        if [ -d ".git" ]; then
-          git fetch origin
-          git checkout ${{ github.ref_name }}
-          git pull origin ${{ github.ref_name }}
-        else
-          echo "⚠️ No git repository found in ${API_DIR}"
-          echo "📋 Available files:"
+        # Обновляем код от имени пользователя окружения
+        echo "📥 Updating code as user ${ENV}..."
+        sudo -u ${ENV} bash -c "
+          cd ${API_DIR}
+          echo '📍 Current directory: $(pwd)'
+          echo '📋 Directory contents:'
           ls -la
-        fi
+          
+          if [ -d '.git' ]; then
+            git fetch origin
+            git checkout ${{ github.ref_name }}
+            git pull origin ${{ github.ref_name }}
+          else
+            echo '⚠️ No git repository found'
+          fi
+        "
         
-        # Активируем venv и устанавливаем зависимости
-        echo "📦 Installing dependencies..."
-        source venv/bin/activate
-        pip install --upgrade pip
-        pip install -r requirements.txt
+        # Устанавливаем зависимости от имени пользователя
+        echo "📦 Installing dependencies as user ${ENV}..."
+        sudo -u ${ENV} bash -c "
+          cd ${API_DIR}
+          source venv/bin/activate
+          pip install --upgrade pip
+          pip install -r requirements.txt
+        "
         
-        # Накатываем миграции
-        echo "🔄 Running migrations..."
-        source venv/bin/activate
-        alembic upgrade head
+        # Накатываем миграции от имени пользователя
+        echo "🔄 Running migrations as user ${ENV}..."
+        sudo -u ${ENV} bash -c "
+          cd ${API_DIR}
+          source venv/bin/activate
+          alembic upgrade head
+        "
         
         # Запускаем сервис
         echo "▶️ Starting ${SERVICE_NAME} service..."
