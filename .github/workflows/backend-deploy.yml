@@ -154,7 +154,15 @@ jobs:
           STATUS_TEXT="deployment failed"
         fi
         
-        MESSAGE="${STATUS_EMOJI} Backend API (${{ env.TARGET_ENV }}) ${STATUS_TEXT}! Branch: ${{ github.ref_name }}, Author: ${{ github.actor }}, Repository: ${{ github.repository }}"
+        MESSAGE="${STATUS_EMOJI} *Backend API (${{ env.TARGET_ENV }})* ${STATUS_TEXT}!
+
+        🌿 *Branch:* \`${{ github.ref_name }}\`
+        👤 *Author:* ${{ github.actor }}
+        📦 *Repository:* ${{ github.repository }}
+        🔗 *Commit:* \`${{ github.sha }}\`
+        ⏰ *Time:* $(date '+%Y-%m-%d %H:%M:%S')
+        
+        🔍 <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Details>"
         
         # Отправляем в основные чаты
         curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
