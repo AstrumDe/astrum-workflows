@@ -28,11 +28,6 @@ jobs:
         echo "Branch: $BRANCH_NAME"
         echo "Event: $EVENT_NAME"
         
-        # ЖЕСТКИЕ ПРАВИЛА - НЕ МОГУТ БЫТЬ ИЗМЕНЕНЫ РАЗРАБОМ:
-        # 1. Push в dev - автоматом деплоим в dev
-        # 2. Manual dispatch - ТОЛЬКО из main в prod/test
-        # 3. Никаких других вариантов
-        
         if [ "$EVENT_NAME" = "push" ]; then
           if [ "$BRANCH_NAME" != "dev" ]; then
             echo "❌ Auto-deploy only allowed for 'dev' branch"
@@ -49,7 +44,6 @@ jobs:
             exit 1
           fi
           
-          # Для manual dispatch определяем окружение по input'у
           TARGET="${{ github.event.inputs.environment || 'prod' }}"
           if [[ "$TARGET" != "prod" && "$TARGET" != "test" ]]; then
             echo "❌ Invalid environment: $TARGET"
@@ -113,6 +107,17 @@ jobs:
         sudo -u ${ENV} bash -c "
           cd ${API_DIR}
           source venv/bin/activate
+          
+          # Проверяем, есть ли изменения в моделях
+          echo '📋 Checking for model changes...'
+          if alembic check 2>/dev/null; then
+            echo '✅ No model changes detected'
+          else
+            echo '🆕 Model changes detected, generating migration...'
+            alembic revision --autogenerate -m \"Auto-generated migration \$(date +'%Y%m%d_%H%M%S')\"
+          fi
+          
+          echo '⬆️ Applying migrations...'
           alembic upgrade head
         "
         
