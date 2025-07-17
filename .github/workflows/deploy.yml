@@ -175,18 +175,22 @@ jobs:
         
         MESSAGE="${STATUS_EMOJI} *Astrum ${{ env.PROJECT_TYPE }} (${{ env.ENVIRONMENT }})* ${STATUS_TEXT}!
 
-        🌿 *Branch:* \`${{ github.ref_name }}\`
-        👤 *Author:* ${{ github.actor }}
-        📦 *Repository:* ${{ github.repository }}
-        🔗 *Commit:* \`${{ github.sha }}\`
-        ⏰ *Time:* $(date '+%Y-%m-%d %H:%M:%S')
+        ┌─────────────────────────────────
+        │ 🌿 Branch: \`${{ github.ref_name }}\`
+        │ 👤 Author: ${{ github.actor }}
+        │ 📦 Repository: ${{ github.repository }}
+        │ 🔗 Commit: \`$(echo '${{ github.sha }}' | cut -c1-7)\`
+        │ ⏰ Time: $(date '+%H:%M:%S')
+        └─────────────────────────────────
         
-        🔍 <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Details>"
+        🔍 [View Details](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
         
         curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
           -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID_1 }}" \
           -d "text=${MESSAGE}"
+          -d "parse_mode=Markdown"
           
         curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
           -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID_2 }}" \
           -d "text=${MESSAGE}"
+          -d "parse_mode=Markdown"
