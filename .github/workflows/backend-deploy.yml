@@ -76,19 +76,49 @@ jobs:
         echo "⏹️ Stopping ${SERVICE_NAME} service..."
         sudo systemctl stop ${SERVICE_NAME}
         
-        # Обновляем код
+        # Обновляем код с фильтрацией миграций
         echo "📥 Updating code for ${ENV} environment..."
         
         TEMP_DIR="/tmp/deploy_${ENV}_$(date +%s)"
         mkdir -p ${TEMP_DIR}
-        cp -r app/ requirements.txt alembic.ini alembic/ ${TEMP_DIR}/ 2>/dev/null || true
+        
+        # Копируем основные файлы (без alembic/versions)
+        cp -r app/ requirements.txt alembic.ini ${TEMP_DIR}/ 2>/dev/null || true
+        
+        # Копируем только структуру alembic без versions
+        if [ -d alembic ]; then
+          mkdir -p ${TEMP_DIR}/alembic
+          cp alembic/*.py ${TEMP_DIR}/alembic/ 2>/dev/null || true
+          cp alembic/*.mako ${TEMP_DIR}/alembic/ 2>/dev/null || true
+          
+          # НЕ копируем alembic/versions - пусть остаются только серверные!
+          echo "🚫 Skipping local migrations from alembic/versions/"
+        fi
         
         sudo -u ${ENV} bash -c "
           cd ${API_DIR}
+          
+          # Бэкапим текущий код
           if [ -d app ]; then
             cp -r app app.backup.\$(date +%Y%m%d_%H%M%S) 2>/dev/null || true
           fi
+          
+          # Бэкапим текущие миграции сервера
+          if [ -d alembic/versions ]; then
+            echo '💾 Backing up server migrations...'
+            cp -r alembic/versions alembic/versions.backup.\$(date +%Y%m%d_%H%M%S) 2>/dev/null || true
+          fi
+          
+          # Копируем новый код
           cp -r ${TEMP_DIR}/* ./
+          
+          # Восстанавливаем серверные миграции (перезаписываем любые локальные)
+          if [ -d alembic/versions.backup.* ]; then
+            LATEST_BACKUP=\$(ls -td alembic/versions.backup.* | head -1)
+            echo \"🔄 Restoring server migrations from \$LATEST_BACKUP\"
+            rm -rf alembic/versions 2>/dev/null || true
+            mv \"\$LATEST_BACKUP\" alembic/versions
+          fi
         "
         
         rm -rf ${TEMP_DIR}
@@ -108,17 +138,27 @@ jobs:
           cd ${API_DIR}
           source venv/bin/activate
           
+          # Показываем текущие миграции на сервере
+          echo '📋 Current server migrations:'
+          ls -la alembic/versions/ 2>/dev/null || echo 'No migrations found'
+          
           # Проверяем, есть ли изменения в моделях
           echo '📋 Checking for model changes...'
           if alembic check 2>/dev/null; then
             echo '✅ No model changes detected'
           else
-            echo '🆕 Model changes detected, generating migration...'
-            alembic revision --autogenerate -m \"Auto-generated migration \$(date +'%Y%m%d_%H%M%S')\"
+            echo '🆕 Model changes detected, generating SERVER migration...'
+            MIGRATION_NAME=\"server_auto_\$(date +'%Y%m%d_%H%M%S')\"
+            alembic revision --autogenerate -m \"\$MIGRATION_NAME\"
+            echo \"📝 Generated migration: \$MIGRATION_NAME\"
           fi
           
           echo '⬆️ Applying migrations...'
           alembic upgrade head
+          
+          # Показываем итоговые миграции
+          echo '📋 Final server migrations:'
+          ls -la alembic/versions/ 2>/dev/null || echo 'No migrations found'
         "
         
         # Запускаем сервис
