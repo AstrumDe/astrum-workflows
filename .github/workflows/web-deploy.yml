@@ -10,7 +10,7 @@ on:
       node_version:
         required: false
         type: string
-        default: '24.11.1'
+        default: '20.17.0'
         description: 'Node.js version'
     secrets:
       TELEGRAM_BOT_TOKEN:
@@ -61,6 +61,12 @@ jobs:
         fi
         
         echo "✅ Validation passed"
+    
+    - name: Setup NVM and Yarn
+      run: |
+        export NVM_DIR="$HOME/.nvm"
+        [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+        echo "$HOME/.nvm/versions/node/v24.11.1/bin" >> $GITHUB_PATH
     
     - name: Setup Node.js
       uses: actions/setup-node@v4
