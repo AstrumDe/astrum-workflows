@@ -25,6 +25,10 @@ on:
         required: true
       TEST_API_URL:
         required: true
+      P2P_DEV_API_URL:
+        required: true
+      P2P_PRODUCTION_API_URL:
+        required: true
 
 jobs:
   deploy:
@@ -81,20 +85,22 @@ jobs:
       run: |
         PROJECT_TYPE="${{ inputs.project_type }}"
         
-        # Определение окружения и путей
         case "${{ github.ref_name }}" in
           "main")
             echo "VITE_API_URL=${{ secrets.PRODUCTION_API_URL }}" > .env
+            echo "VITE_P2P_URL=${{ secrets.P2P_PRODUCTION_API_URL }}" >> .env
             DEPLOY_PATH="/opt/github-runner/prod-web/$PROJECT_TYPE"
             ENVIRONMENT="production"
             ;;
           "dev")
             echo "VITE_API_URL=${{ secrets.DEV_API_URL }}" > .env
+            echo "VITE_P2P_URL=${{ secrets.P2P_DEV_API_URL }}" >> .env
             DEPLOY_PATH="/opt/github-runner/dev-web/$PROJECT_TYPE"
             ENVIRONMENT="development"
             ;;
           "test")
             echo "VITE_API_URL=${{ secrets.TEST_API_URL }}" > .env
+            echo "VITE_P2P_URL=${{ secrets.P2P_DEV_API_URL }}" >> .env
             DEPLOY_PATH="/opt/github-runner/test-web/$PROJECT_TYPE"
             ENVIRONMENT="test"
             ;;
