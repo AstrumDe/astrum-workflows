@@ -12,6 +12,11 @@ on:
         type: string
         default: '20.17.0'
         description: 'Node.js version'
+      environment:
+        required: false
+        type: string
+        default: ''
+        description: 'dev | test | production.'
     secrets:
       TELEGRAM_BOT_TOKEN:
         required: true
@@ -32,7 +37,7 @@ on:
 
 jobs:
   deploy:
-    runs-on: ${{ github.ref_name == 'main' && fromJSON('["self-hosted", "prod-runner"]') || fromJSON('["self-hosted", "test-runner"]') }}
+    runs-on: ${{ (inputs.environment == 'production' || (inputs.environment == '' && github.ref_name == 'main')) && fromJSON('["self-hosted", "prod-runner"]') || fromJSON('["self-hosted", "test-runner"]') }}
     
     steps:
     - uses: actions/checkout@v4
@@ -85,8 +90,28 @@ jobs:
       run: |
         PROJECT_TYPE="${{ inputs.project_type }}"
         
-        case "${{ github.ref_name }}" in
-          "main")
+        # Окружение: явный выбор (workflow_dispatch) главнее имени ветки. Так можно залить любую ветку в dev/test.
+        TARGET="${{ inputs.environment }}"
+        if [ -z "$TARGET" ]; then
+          case "${{ github.ref_name }}" in
+            "main") TARGET="production" ;;
+            "dev") TARGET="dev" ;;
+            "test") TARGET="test" ;;
+            *)
+              echo "❌ Unknown branch: ${{ github.ref_name }} (выберите environment при запуске)"
+              exit 1
+              ;;
+          esac
+        fi
+
+        # Production — только из main
+        if [ "$TARGET" = "production" ] && [ "${{ github.ref_name }}" != "main" ]; then
+          echo "❌ Production deploy is allowed only from main"
+          exit 1
+        fi
+
+        case "$TARGET" in
+          "production")
             echo "VITE_API_URL=${{ secrets.PRODUCTION_API_URL }}" > .env
             echo "VITE_P2P_URL=${{ secrets.P2P_PRODUCTION_API_URL }}" >> .env
             DEPLOY_PATH="/opt/github-runner/prod-web/$PROJECT_TYPE"
@@ -105,7 +130,7 @@ jobs:
             ENVIRONMENT="test"
             ;;
           *)
-            echo "❌ Unknown branch: ${{ github.ref_name }}"
+            echo "❌ Unknown environment: $TARGET"
             exit 1
             ;;
         esac
