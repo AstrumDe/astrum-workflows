@@ -1,0 +1,79 @@
+# Reusable deploy workflow for the P2P stack. Project repos call it via a thin
+# caller (see the deploy README, "Deploys"). Published as p2p-deploy.yml in the
+# organization's workflows repo so project contributors cannot change what
+# runs on the hosts.
+name: P2P deploy
+
+on:
+  workflow_call:
+    inputs:
+      component:
+        description: api | chat | app
+        type: string
+        required: true
+      environment:
+        description: production (main only) | dev (any branch)
+        type: string
+        required: true
+      services:
+        description: api only — space-separated subset of "api celery"
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: [self-hosted, "${{ inputs.environment == 'production' && 'p2p-prod' || 'p2p-dev' }}"]
+    # Environment is resolved in the caller repo.
+    environment: ${{ inputs.environment }}
+    concurrency:
+      group: p2p-${{ inputs.environment }}-deploy-${{ inputs.component }}
+      cancel-in-progress: false
+    timeout-minutes: 30
+    steps:
+      # Before checkout: code from a rejected run never lands on the host.
+      - name: Check target
+        env:
+          TARGET_ENV: ${{ inputs.environment }}
+          COMPONENT: ${{ inputs.component }}
+          TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+          # Organization variable: GitHub logins allowed to deploy production,
+          # separated by spaces or commas. Empty or unset → nobody.
+          PROD_DEPLOYERS: ${{ vars.P2P_PROD_DEPLOYERS }}
+        run: |
+          # Callers are editable by project contributors, so the trigger is
+          # enforced here: manual runs only.
+          [ "$GITHUB_EVENT_NAME" = workflow_dispatch ] || {
+            echo "::error::deploys are manual only (got $GITHUB_EVENT_NAME)"; exit 1; }
+          case "$TARGET_ENV" in
+            production)
+              [ "$GITHUB_REF" = refs/heads/main ] || {
+                echo "::error::production deploys only from main (got $GITHUB_REF)"; exit 1; }
+              # Logins are case-insensitive.
+              allowed=" $(printf '%s' "$PROD_DEPLOYERS" | tr 'A-Z,\n' 'a-z  ') "
+              actor="$(printf '%s' "$TRIGGERING_ACTOR" | tr 'A-Z' 'a-z')"
+              case "$allowed" in
+                *" ${actor:?no triggering actor} "*) ;;
+                *) echo "::error::$TRIGGERING_ACTOR is not allowed to deploy production"; exit 1 ;;
+              esac ;;
+            dev) ;;
+            *) echo "::error::unknown environment: $TARGET_ENV"; exit 1 ;;
+          esac
+          case "$COMPONENT" in
+            api|chat|app) ;;
+            *) echo "::error::unknown component: $COMPONENT"; exit 1 ;;
+          esac
+          # Set by bootstrap-host.sh in the runner's .env, not by the caller.
+          [ -n "${P2P_ROOT:-}" ] || { echo "::error::P2P_ROOT is not set on this runner"; exit 1; }
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Deploy
+        env:
+          COMPONENT: ${{ inputs.component }}
+          SERVICES: ${{ inputs.services }}
+        run: '"$P2P_ROOT/deploy/bin/deploy.sh" "$COMPONENT" "$GITHUB_WORKSPACE" "$GITHUB_SHA" "$SERVICES"'
