@@ -81,6 +81,7 @@ jobs:
           persist-credentials: false
 
       - name: Deploy
+        id: deploy
         env:
           TARGET_ENV: ${{ inputs.environment }}
           RESTART_API: ${{ inputs.restart_api }}
@@ -101,6 +102,9 @@ jobs:
           dc() { docker compose -f "$COMPOSE" "$@"; }
           services() { dc config --services | grep -E "^$P-$1\$" | sort -V; }
           alembic() { (cd "$ROOT" && .venv/bin/python -m alembic "$@"); }
+          revision() { alembic current 2>/dev/null | awk 'NR==1 {print $1}'; }
+          # Results for the Notify step; a later value overrides an earlier one.
+          out() { echo "$1=$2" >> "$GITHUB_OUTPUT"; }
           ip_of() { docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}' "$1"; }
 
           wait_healthy() {
@@ -153,6 +157,9 @@ jobs:
 
           if [ "$MIGRATE" = true ] || [ "$CREATE_MIGRATION" = true ]; then
             echo "::group::Migrations"
+            out migration "ошибка"
+            rev_before="$(revision)"
+            created=""
             alembic upgrade head
             if [ "$CREATE_MIGRATION" = true ]; then
               if alembic check; then
@@ -160,10 +167,17 @@ jobs:
               else
                 alembic revision --autogenerate -m "auto_$(date +%Y%m%d_%H%M%S)"
                 alembic upgrade head
+                created=", создана $(revision)"
                 echo "::warning::A migration was generated on the host in $ROOT/app/migrations/versions — commit it to the repo"
               fi
             fi
-            alembic current
+            rev_after="$(revision)"
+            if [ "$rev_after" = "$rev_before" ]; then
+              out migration "нет обновлений базы (${rev_after:-пусто})"
+            else
+              out migration "${rev_before:-пусто} → $rev_after$created"
+            fi
+            echo "Revision: $rev_after"
             echo "::endgroup::"
           fi
 
@@ -181,6 +195,7 @@ jobs:
                 echo "nginx reloaded: $s moved from ${old_ip:-?} to $(ip_of "$s")"
               fi
             done
+            out api done
             echo "::endgroup::"
           fi
 
@@ -194,6 +209,7 @@ jobs:
                 echo "::error::$s is not running"; docker logs --tail 50 "$s" || true; exit 1; }
               echo "✓ $s is running"
             done
+            out celery done
             echo "::endgroup::"
           fi
 
@@ -204,20 +220,21 @@ jobs:
           CHAT_IDS: ${{ secrets.TELEGRAM_CHAT_IDS }}
           STATUS: ${{ job.status }}
           TARGET_ENV: ${{ inputs.environment }}
-          OPTIONS: >-
-            ${{ inputs.restart_api && 'api' || '' }}
-            ${{ inputs.restart_celery && 'celery' || '' }}
-            ${{ inputs.create_migration && 'create-migration' || '' }}
-            ${{ inputs.migrate && 'migrate' || '' }}
-            ${{ inputs.rebuild_api && 'rebuild' || '' }}
+          API: ${{ (inputs.restart_api || inputs.rebuild_api) && (steps.deploy.outputs.api == 'done' && 'перезапущен' || 'не завершён') || 'не перезапускался' }}
+          CELERY: ${{ inputs.restart_celery && (steps.deploy.outputs.celery == 'done' && 'перезапущен' || 'не завершён') || 'не перезапускался' }}
+          MIGRATION: ${{ steps.deploy.outputs.migration || ((inputs.migrate || inputs.create_migration) && 'не дошло до запуска' || 'не запускалась') }}
+          REBUILD: ${{ inputs.rebuild_api && 'да' || 'нет' }}
         run: |
           [ -n "$BOT_TOKEN" ] && [ -n "$CHAT_IDS" ] || { echo "Telegram is not configured"; exit 0; }
           [ "$STATUS" = success ] && icon="✅" || icon="❌"
           text="$icon Backend ($TARGET_ENV): $STATUS
-          Branch: $GITHUB_REF_NAME
-          Commit: ${GITHUB_SHA:0:7}
-          By: $GITHUB_TRIGGERING_ACTOR
-          Options: $(echo $OPTIONS)
+          Ветка: $GITHUB_REF_NAME
+          Коммит: ${GITHUB_SHA:0:7}
+          Запустил: $GITHUB_TRIGGERING_ACTOR
+          API: $API
+          Celery: $CELERY
+          Миграция: $MIGRATION
+          Пересборка: $REBUILD
           $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
           for chat in ${CHAT_IDS//,/ }; do
             curl -fsS -m 10 -o /dev/null "https://api.telegram.org/bot$BOT_TOKEN/sendMessage" \
