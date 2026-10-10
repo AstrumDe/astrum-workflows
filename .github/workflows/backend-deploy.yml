@@ -1,233 +1,226 @@
-name: Reusable Backend Deploy Workflow
+# Reusable deploy workflow for the Astrum backend (API + Celery). The backend
+# repo calls it via a thin caller. Lives in the organization's workflows repo
+# so project contributors cannot change what runs on the hosts.
+name: Astrum backend deploy
 
 on:
   workflow_call:
+    inputs:
+      environment:
+        description: production (main only) | dev (any branch)
+        type: string
+        required: true
+      restart_api:
+        description: Restart API containers one by one
+        type: boolean
+        default: true
+      restart_celery:
+        description: Restart Celery workers and beat
+        type: boolean
+        default: false
+      create_migration:
+        description: Autogenerate an alembic revision on the host and apply it
+        type: boolean
+        default: false
+      migrate:
+        description: Apply migrations (alembic upgrade head)
+        type: boolean
+        default: false
+      rebuild_api:
+        description: Rebuild the image and recreate containers (picks up .env)
+        type: boolean
+        default: false
     secrets:
       TELEGRAM_BOT_TOKEN:
-        required: true
-      TELEGRAM_CHAT_ID_1:
-        required: true
-      TELEGRAM_CHAT_ID_2:
-        required: true
+        required: false
       TELEGRAM_CHAT_IDS:
         required: false
-        description: 'Comma-separated list of additional chat IDs'
+        description: Comma-separated list of chat IDs
+
+permissions:
+  contents: read
 
 jobs:
   deploy:
-    runs-on: [self-hosted]
-    
+    runs-on: [self-hosted, "${{ inputs.environment == 'production' && 'prod-runner' || 'test-runner' }}"]
+    concurrency:
+      group: astrum-backend-${{ inputs.environment }}-deploy
+      cancel-in-progress: false
+    timeout-minutes: 30
     steps:
-    - uses: actions/checkout@v4
-    
-    - name: Validate deployment permissions
-      run: |
-        BRANCH_NAME="${{ github.ref_name }}"
-        EVENT_NAME="${{ github.event_name }}"
-        
-        echo "Branch: $BRANCH_NAME"
-        echo "Event: $EVENT_NAME"
-        
-        if [ "$EVENT_NAME" = "push" ]; then
-          if [ "$BRANCH_NAME" != "dev" ]; then
-            echo "❌ Auto-deploy only allowed for 'dev' branch"
-            exit 1
-          fi
-          echo "TARGET_ENV=dev" >> $GITHUB_ENV
-          echo "✅ Auto-deploy to dev environment"
-          
-        elif [ "$EVENT_NAME" = "workflow_dispatch" ]; then
-          if [ "$BRANCH_NAME" != "main" ]; then
-            echo "❌ Manual deploy only allowed from 'main' branch"
-            echo "❌ Current branch: $BRANCH_NAME"
-            echo "❌ For dev deployment, push to 'dev' branch instead"
-            exit 1
-          fi
-          
-          TARGET="${{ github.event.inputs.environment || 'prod' }}"
-          if [[ "$TARGET" != "prod" && "$TARGET" != "test" ]]; then
-            echo "❌ Invalid environment: $TARGET"
-            exit 1
-          fi
-          
-          echo "TARGET_ENV=$TARGET" >> $GITHUB_ENV
-          echo "✅ Manual deploy to $TARGET environment"
-          
-        else
-          echo "❌ Unsupported event: $EVENT_NAME"
-          exit 1
-        fi
-        
-        echo "✅ Validation passed"
-    
-    - name: Deploy to server
-      run: |
-        set -e
-        
-        ENV="${{ env.TARGET_ENV }}"
-        API_DIR="/home/${ENV}/api"
-        SERVICE_NAME="${ENV}-api"
-        
-        echo "🎯 Deploying to ${ENV} environment..."
-        echo "📁 API Directory: ${API_DIR}"
-        echo "🔧 Service: ${SERVICE_NAME}"
-        
-        # Останавливаем сервис
-        echo "⏹️ Stopping ${SERVICE_NAME} service..."
-        sudo systemctl stop ${SERVICE_NAME}
-        
-        # Обновляем код с фильтрацией миграций
-        echo "📥 Updating code for ${ENV} environment..."
-        
-        TEMP_DIR="/tmp/deploy_${ENV}_$(date +%s)"
-        mkdir -p ${TEMP_DIR}
-        
-        # Копируем основные файлы (без alembic/versions)
-        cp -r app/ requirements.txt alembic.ini ${TEMP_DIR}/ 2>/dev/null || true
-        
-        # Копируем только структуру alembic без versions
-        if [ -d alembic ]; then
-          mkdir -p ${TEMP_DIR}/alembic
-          cp alembic/*.py ${TEMP_DIR}/alembic/ 2>/dev/null || true
-          cp alembic/*.mako ${TEMP_DIR}/alembic/ 2>/dev/null || true
-          
-          # НЕ копируем alembic/versions - пусть остаются только серверные!
-          echo "🚫 Skipping local migrations from alembic/versions/"
-        fi
-        
-        sudo -u ${ENV} bash -c "
-          cd ${API_DIR}
-          
-          # Бэкапим текущий код
-          if [ -d app ]; then
-            cp -r app app.backup.\$(date +%Y%m%d_%H%M%S) 2>/dev/null || true
-          fi
-          
-          # Бэкапим текущие миграции сервера
-          if [ -d alembic/versions ]; then
-            echo '💾 Backing up server migrations...'
-            cp -r alembic/versions alembic/versions.backup.\$(date +%Y%m%d_%H%M%S) 2>/dev/null || true
-          fi
-          
-          # Копируем новый код
-          cp -r ${TEMP_DIR}/* ./
-          
-          # Восстанавливаем серверные миграции (перезаписываем любые локальные)
-          if [ -d alembic/versions.backup.* ]; then
-            LATEST_BACKUP=\$(ls -td alembic/versions.backup.* | head -1)
-            echo \"🔄 Restoring server migrations from \$LATEST_BACKUP\"
-            rm -rf alembic/versions 2>/dev/null || true
-            mv \"\$LATEST_BACKUP\" alembic/versions
-          fi
-        "
-        
-        rm -rf ${TEMP_DIR}
-        
-        # Устанавливаем зависимости от имени пользователя
-        echo "📦 Installing dependencies as user ${ENV}..."
-        sudo -u ${ENV} bash -c "
-          cd ${API_DIR}
-          source venv/bin/activate
-          pip install --upgrade pip
-          pip install -r requirements.txt
-        "
-        
-        # Накатываем миграции от имени пользователя
-        echo "🔄 Running migrations as user ${ENV}..."
-        sudo -u ${ENV} bash -c "
-          cd ${API_DIR}
-          source venv/bin/activate
-          
-          # Показываем текущие миграции на сервере
-          echo '📋 Current server migrations:'
-          ls -la alembic/versions/ 2>/dev/null || echo 'No migrations found'
-          
-          # Проверяем, есть ли изменения в моделях
-          echo '📋 Checking for model changes...'
-          if alembic check 2>/dev/null; then
-            echo '✅ No model changes detected'
-          else
-            echo '🆕 Model changes detected, generating SERVER migration...'
-            MIGRATION_NAME=\"server_auto_\$(date +'%Y%m%d_%H%M%S')\"
-            alembic revision --autogenerate -m \"\$MIGRATION_NAME\"
-            echo \"📝 Generated migration: \$MIGRATION_NAME\"
-          fi
-          
-          echo '⬆️ Applying migrations...'
-          alembic upgrade head
-          
-          # Показываем итоговые миграции
-          echo '📋 Final server migrations:'
-          ls -la alembic/versions/ 2>/dev/null || echo 'No migrations found'
-        "
-        
-        # Запускаем сервис
-        echo "▶️ Starting ${SERVICE_NAME} service..."
-        sudo systemctl start ${SERVICE_NAME}
-        
-        # Ждем и проверяем статус
-        sleep 5
-        echo "🔍 Checking service status..."
-        sudo systemctl status ${SERVICE_NAME} --no-pager
-        
-        # Финальная проверка
-        if sudo systemctl is-active --quiet ${SERVICE_NAME}; then
-          echo "✅ ${SERVICE_NAME} is running successfully!"
-          echo "DEPLOY_STATUS=success" >> $GITHUB_ENV
-        else
-          echo "❌ ${SERVICE_NAME} failed to start!"
-          echo "📋 Service logs:"
-          sudo journalctl -u ${SERVICE_NAME} --no-pager -n 50
-          echo "DEPLOY_STATUS=failed" >> $GITHUB_ENV
-          exit 1
-        fi
-        
-        echo "🚀 Deployment completed successfully!"
-        
-    - name: Send Telegram notifications
-      if: always()
-      run: |
-        STATUS_EMOJI="✅"
-        STATUS_TEXT="deployed successfully"
-        if [ "${{ job.status }}" != "success" ]; then
-          STATUS_EMOJI="❌"
-          STATUS_TEXT="deployment failed"
-        fi
-        
-        MESSAGE="${STATUS_EMOJI} *Backend API (${{ env.TARGET_ENV }})* ${STATUS_TEXT}!
+      # Before checkout: code from a rejected run never lands on the host.
+      - name: Check target
+        env:
+          TARGET_ENV: ${{ inputs.environment }}
+          TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+          # Organization variable: GitHub logins allowed to deploy production,
+          # separated by spaces or commas. Empty or unset → nobody.
+          PROD_DEPLOYERS: ${{ vars.ASTRUM_PROD_DEPLOYERS }}
+        run: |
+          # Callers are editable by project contributors, so the trigger is
+          # enforced here: manual runs only.
+          [ "$GITHUB_EVENT_NAME" = workflow_dispatch ] || {
+            echo "::error::deploys are manual only (got $GITHUB_EVENT_NAME)"; exit 1; }
+          case "$TARGET_ENV" in
+            production)
+              [ "$GITHUB_REF" = refs/heads/main ] || {
+                echo "::error::production deploys only from main (got $GITHUB_REF)"; exit 1; }
+              # Logins are case-insensitive.
+              allowed=" $(printf '%s' "$PROD_DEPLOYERS" | tr 'A-Z,\n' 'a-z  ') "
+              actor="$(printf '%s' "$TRIGGERING_ACTOR" | tr 'A-Z' 'a-z')"
+              case "$allowed" in
+                *" ${actor:?no triggering actor} "*) ;;
+                *) echo "::error::$TRIGGERING_ACTOR is not allowed to deploy production"; exit 1 ;;
+              esac ;;
+            dev) ;;
+            *) echo "::error::unknown environment: $TARGET_ENV"; exit 1 ;;
+          esac
 
-        🌿 *Branch:* \`${{ github.ref_name }}\`
-        👤 *Author:* ${{ github.actor }}
-        📦 *Repository:* ${{ github.repository }}
-        🔗 *Commit:* \`${{ github.sha }}\`
-        ⏰ *Time:* $(date '+%Y-%m-%d %H:%M:%S')
-        
-        🔍 <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Details>"
-        
-        # Отправляем в основные чаты
-        curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
-          -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID_1 }}" \
-          -d "text=${MESSAGE}" \
-          -d "parse_mode=Markdown"
-          
-        curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
-          -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID_2 }}" \
-          -d "text=${MESSAGE}" \
-          -d "parse_mode=Markdown"
-        
-        # Отправляем в дополнительные чаты из списка (если есть)
-        CHAT_IDS="${{ secrets.TELEGRAM_CHAT_IDS }}"
-        if [ -n "$CHAT_IDS" ]; then
-          IFS=',' read -ra CHAT_ARRAY <<< "$CHAT_IDS"
-          for chat_id in "${CHAT_ARRAY[@]}"; do
-            # Убираем пробелы
-            chat_id=$(echo "$chat_id" | tr -d ' ')
-            if [ -n "$chat_id" ]; then
-              echo "Sending to additional chat: $chat_id"
-              curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
-                -d "chat_id=${chat_id}" \
-                -d "text=${MESSAGE}" \
-                -d "parse_mode=Markdown"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Deploy
+        env:
+          TARGET_ENV: ${{ inputs.environment }}
+          RESTART_API: ${{ inputs.restart_api }}
+          RESTART_CELERY: ${{ inputs.restart_celery }}
+          CREATE_MIGRATION: ${{ inputs.create_migration }}
+          MIGRATE: ${{ inputs.migrate }}
+          REBUILD_API: ${{ inputs.rebuild_api }}
+        run: |
+          set -euo pipefail
+
+          case "$TARGET_ENV" in production) P=prod ;; dev) P=dev ;; *) exit 1 ;; esac
+          ROOT="/opt/github-runner/$P"
+          COMPOSE="/opt/github-runner/$P-config/docker-compose.yaml"
+          HEALTH_URL="http://127.0.0.1:8000/api/users/health"
+          HEALTH_TIMEOUT=90
+          [ -d "$ROOT" ] && [ -f "$COMPOSE" ] || { echo "::error::$ROOT or $COMPOSE is missing"; exit 1; }
+
+          dc() { docker compose -f "$COMPOSE" "$@"; }
+          services() { dc config --services | grep -E "^$P-$1\$" | sort -V; }
+          alembic() { (cd "$ROOT" && .venv/bin/python -m alembic "$@"); }
+          ip_of() { docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}' "$1"; }
+
+          wait_healthy() {
+            local waited=0
+            until docker exec "$1" curl -fsS -m 3 "$HEALTH_URL" 2>/dev/null | grep -q '"status":"ok"'; do
+              if [ "$waited" -ge "$HEALTH_TIMEOUT" ]; then
+                echo "::error::$1 is not healthy after ${HEALTH_TIMEOUT}s"
+                docker logs --tail 50 "$1" || true
+                return 1
+              fi
+              sleep 3; waited=$((waited + 3))
+            done
+            echo "✓ $1 is healthy (${waited}s)"
+          }
+
+          # Stop, then start or recreate one service and wait until its container is up.
+          cycle() {
+            if [ "$REBUILD_API" = true ]; then
+              dc up -d --no-deps --force-recreate -t "$2" "$1"
+            else
+              dc stop -t "$2" "$1"
+              dc start "$1"
             fi
+          }
+
+          echo "::group::Code"
+          deps_changed=false
+          cmp -s requirements.txt "$ROOT/requirements.txt" || deps_changed=true
+          # No --delete and no -t/-p: the tree holds server-only data (uploads,
+          # generated migrations) and files the runner does not own.
+          rsync -rlc --omit-dir-times --itemize-changes \
+            --exclude=.git --exclude=.github --exclude=.env --exclude=.venv --exclude=venv \
+            --exclude=__pycache__ --exclude='*.pyc' --exclude='*.log' --exclude='*.log.zip' \
+            --exclude=/receipts --exclude=/public --exclude=/celerybeat-schedule \
+            ./ "$ROOT/"
+          echo "::endgroup::"
+
+          if [ "$deps_changed" = true ]; then
+            echo "::group::Dependencies"
+            "$ROOT/.venv/bin/pip" install --no-cache-dir -r "$ROOT/requirements.txt"
+            echo "::endgroup::"
+          fi
+
+          if [ "$REBUILD_API" = true ]; then
+            echo "::group::Build"
+            # One image for API, Celery, SSE and Flower.
+            dc build -q "$P-api-1"
+            echo "::endgroup::"
+          fi
+
+          if [ "$MIGRATE" = true ] || [ "$CREATE_MIGRATION" = true ]; then
+            echo "::group::Migrations"
+            alembic upgrade head
+            if [ "$CREATE_MIGRATION" = true ]; then
+              if alembic check; then
+                echo "No model changes — nothing to generate"
+              else
+                alembic revision --autogenerate -m "auto_$(date +%Y%m%d_%H%M%S)"
+                alembic upgrade head
+                echo "::warning::A migration was generated on the host in $ROOT/app/migrations/versions — commit it to the repo"
+              fi
+            fi
+            alembic current
+            echo "::endgroup::"
+          fi
+
+          if [ "$RESTART_API" = true ] || [ "$REBUILD_API" = true ]; then
+            echo "::group::API"
+            for s in $(services 'api-[0-9]+'); do
+              echo "→ $s"
+              old_ip="$(ip_of "$s" 2>/dev/null || true)"
+              cycle "$s" 30
+              wait_healthy "$s"
+              # nginx resolves upstreams once, at (re)load.
+              if [ "$(ip_of "$s")" != "$old_ip" ]; then
+                docker exec "$P-nginx" nginx -t
+                docker exec "$P-nginx" nginx -s reload
+                echo "nginx reloaded: $s moved from ${old_ip:-?} to $(ip_of "$s")"
+              fi
+            done
+            echo "::endgroup::"
+          fi
+
+          if [ "$RESTART_CELERY" = true ]; then
+            echo "::group::Celery"
+            for s in $(services 'celery-worker-[0-9]+') "$P-celery-beat"; do
+              echo "→ $s"
+              cycle "$s" 60
+              sleep 5
+              [ "$(docker inspect -f '{{.State.Status}}' "$s")" = running ] || {
+                echo "::error::$s is not running"; docker logs --tail 50 "$s" || true; exit 1; }
+              echo "✓ $s is running"
+            done
+            echo "::endgroup::"
+          fi
+
+      - name: Notify
+        if: always()
+        env:
+          BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHAT_IDS: ${{ secrets.TELEGRAM_CHAT_IDS }}
+          STATUS: ${{ job.status }}
+          TARGET_ENV: ${{ inputs.environment }}
+          OPTIONS: >-
+            ${{ inputs.restart_api && 'api' || '' }}
+            ${{ inputs.restart_celery && 'celery' || '' }}
+            ${{ inputs.create_migration && 'create-migration' || '' }}
+            ${{ inputs.migrate && 'migrate' || '' }}
+            ${{ inputs.rebuild_api && 'rebuild' || '' }}
+        run: |
+          [ -n "$BOT_TOKEN" ] && [ -n "$CHAT_IDS" ] || { echo "Telegram is not configured"; exit 0; }
+          [ "$STATUS" = success ] && icon="✅" || icon="❌"
+          text="$icon Backend ($TARGET_ENV): $STATUS
+          Branch: $GITHUB_REF_NAME
+          Commit: ${GITHUB_SHA:0:7}
+          By: $GITHUB_TRIGGERING_ACTOR
+          Options: $(echo $OPTIONS)
+          $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          for chat in ${CHAT_IDS//,/ }; do
+            curl -fsS -m 10 -o /dev/null "https://api.telegram.org/bot$BOT_TOKEN/sendMessage" \
+              --data-urlencode "chat_id=$chat" --data-urlencode "text=$text" \
+              --data-urlencode "disable_web_page_preview=true" || true
           done
-        fi
